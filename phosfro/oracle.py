@@ -492,3 +492,100 @@ class Oracle:
             return img_final.numpy(), achieved_outputs.numpy(), np.asarray(loss_history, dtype=np.float32)
         else:
             return img_final.numpy(), achieved_outputs.numpy()
+    def compute_edge_jacobian(
+        self,
+        edge_outputs: Array,
+        edge_image: Array,
+        target_outputs: Array,
+        *,
+        return_flat: bool = True,
+        check_edge_match: bool = True,
+        atol: float = 1e-5,
+    ):
+        """
+        Compute the Jacobian of mosaic outputs with respect to image pixels,
+        evaluated at an image that already sits at / near a boundary point.
+
+        Parameters
+        ----------
+        edge_outputs : np.ndarray
+            Mosaic response corresponding to edge_image. This is only used as a
+            sanity check; the Jacobian itself is determined by edge_image.
+        edge_image : np.ndarray
+            Image of shape (H, W, 3) at which to evaluate the Jacobian.
+        target_outputs : np.ndarray
+            OOM target mosaic response you are trying to get closer to.
+            Not needed for J itself, but used to return the residual vector
+            (target - achieved_outputs) for downstream local-geometry analysis.
+        return_flat : bool
+            If True, return J with shape (N_cells, H*W*3).
+            If False, return J with shape (N_cells, H, W, 3).
+        check_edge_match : bool
+            If True, compare the provided edge_outputs to the forward pass from
+            edge_image and raise if they do not match within atol.
+        atol : float
+            Tolerance for the edge_outputs sanity check.
+
+        Returns
+        -------
+        J : np.ndarray
+            Jacobian d(outputs)/d(image), evaluated at edge_image.
+            Shape is (N_cells, H*W*3) if return_flat=True, else (N_cells, H, W, 3).
+        achieved_outputs : np.ndarray
+            Forward-model outputs at edge_image.
+        residual_to_target : np.ndarray
+            target_outputs - achieved_outputs
+        match_err : float
+            max absolute difference between provided edge_outputs and achieved_outputs
+        """
+        H, W = self.height, self.width
+
+        edge_image = np.asarray(edge_image, dtype=np.float32)
+        if edge_image.shape != (H, W, 3):
+            raise ValueError(f"edge_image must have shape {(H, W, 3)}, got {edge_image.shape}")
+
+        edge_outputs_tf = tf.cast(edge_outputs, tf.float32)
+        target_outputs_tf = tf.cast(target_outputs, tf.float32)
+
+        img_var = tf.Variable(edge_image, dtype=tf.float32)
+
+        with tf.GradientTape() as tape:
+            img_clipped = tf.clip_by_value(img_var, 0.0, 1.0)
+
+            # same straight-through clamp trick as in solve()
+            img_clamped = img_var + tf.stop_gradient(img_clipped - img_var)
+
+            self.bip_processor.process_new_image(
+                image=img_clamped,
+                method="grayscale",
+                stimulation_mosaic=None,
+                amacrine_sigma_blur=None,
+            )
+
+            achieved_outputs = tf.cast(self.bip_processor.cell_outputs, tf.float32)
+
+        J = tape.jacobian(
+            achieved_outputs,
+            img_var,
+            unconnected_gradients=tf.UnconnectedGradients.ZERO,
+        )  # shape: (N_cells, H, W, 3)
+
+        if return_flat:
+            J = tf.reshape(J, [tf.shape(J)[0], -1])  # (N_cells, H*W*3)
+
+        match_err = float(tf.reduce_max(tf.abs(achieved_outputs - edge_outputs_tf)).numpy())
+
+        if check_edge_match and match_err > atol:
+            raise ValueError(
+                f"Provided edge_outputs do not match forward pass from edge_image. "
+                f"max abs diff = {match_err:.6e} > atol = {atol:.6e}"
+            )
+
+        residual_to_target = target_outputs_tf - achieved_outputs
+
+        return (
+            J.numpy(),
+            achieved_outputs.numpy(),
+            residual_to_target.numpy(),
+            match_err,
+        )

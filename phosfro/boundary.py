@@ -104,6 +104,8 @@ class ChordRunner:
         stop_loss_threshold = None,
         stop_if_no_improve_steps = None,
         stop_min_improvement = 0.0,
+        include_start = False,
+        skip_final_target=False
     ):
         """
         Parameters
@@ -133,6 +135,8 @@ class ChordRunner:
         stop_min_improvement:
             Minimum loss decrease to count as an improvement for the
             stop_if_no_improve_steps criterion.
+        include_start:
+            If True, includes the warm start as the first point to search
 
         Returns
         -------
@@ -143,6 +147,7 @@ class ChordRunner:
         s = tf.cast(tf.reshape(tf.convert_to_tensor(target_mosaic), [-1]), tf.float32)
 
         n_chord_steps = int(n_chord_steps)
+        n_print = n_chord_steps - (1 if skip_final_target else 0)
         if n_chord_steps < 1:
             raise ValueError("n_chord_steps must be >= 1")
 
@@ -166,11 +171,13 @@ class ChordRunner:
         mse_losses = []
 
         init_img = warm_start_image
-
-        for k in range(1, len(chord_targets_tf)):
+        start_k = 0 if include_start else 1
+        end_k = len(chord_targets_tf) - (1 if skip_final_target else 0)
+        for k in range(start_k, end_k):
             target_k = chord_targets_tf[k]
             if verbose:
-                print(f"[ScootChordRunner] step {k}/{n_chord_steps}")
+                
+                print(f"[ScootChordRunner] step {k}/{n_print}")
 
             img_k, mos_k, loss_k, mse_loss_k = self.oracle.solve(
                 target_k,
